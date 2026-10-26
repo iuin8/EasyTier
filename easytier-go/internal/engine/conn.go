@@ -142,15 +142,23 @@ func (conn *streamConn) Close() error {
 		// Close must not inherit an application deadline: the guest applies the
 		// stream's write deadline to shutdown(), so an expired SetDeadline or
 		// SetWriteDeadline would turn the FIN into a deadline error. Clear the
-		// write deadline first; a failure here is irrelevant because the
-		// resource is released immediately afterwards.
-		_ = conn.instance.setDataPlaneResourceDeadline(
+		// write deadline first, bounded by the same shutdown budget.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), tcpShutdownTimeout)
+		clearCtx, cancelClear := context.WithTimeout(shutdownCtx, tcpShutdownTimeout/4)
+		_ = conn.instance.setDataPlaneResourceDeadlineContext(
+			clearCtx,
 			conn.resource,
 			coreabi.DeadlineWrite,
 			time.Time{},
 		)
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), tcpShutdownTimeout)
-		_, shutdownErr := conn.instance.performOperation(
+		cancelClear()
+		// The guest shutdown closes the write half and then waits for the peer
+		// to ACK our FIN. After a sequential close the peer is already gone and
+		// no ACK can arrive, so this wait always ends in a deadline. Only that
+		// post-submit deadline is expected: if the operation never reached the
+		// guest (submit-phase timeout), Close still reports it.
+		submitted := false
+		_, shutdownErr := conn.instance.performOperationNotify(
 			shutdownCtx,
 			coreabi.OperationTCPShutdownWrite,
 			func(
@@ -159,12 +167,16 @@ func (conn *streamConn) Close() error {
 			) (coreabi.OperationID, error) {
 				return core.SubmitTCPShutdownWrite(callCtx, conn.resource)
 			},
+			func() { submitted = true },
 		)
 		cancel()
-		if shutdownErr != nil && !errors.Is(shutdownErr, context.DeadlineExceeded) {
-			shutdownErr = fmt.Errorf("shutdown write: %w", shutdownErr)
-		} else {
+		switch {
+		case shutdownErr == nil:
+		case submitted && errors.Is(shutdownErr, context.DeadlineExceeded):
+			// FIN was accepted by the guest; only the ACK wait expired.
 			shutdownErr = nil
+		default:
+			shutdownErr = fmt.Errorf("shutdown write: %w", shutdownErr)
 		}
 		conn.closeErr = shutdownErr
 		if err := conn.instance.closeDataPlaneResource(conn.resource); err != nil && conn.closeErr == nil {
@@ -172,6 +184,7 @@ func (conn *streamConn) Close() error {
 		}
 		close(conn.closeDone)
 	})
+
 	<-conn.closeDone
 	return conn.closeErr
 }

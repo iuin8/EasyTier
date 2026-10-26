@@ -124,6 +124,19 @@ func (instance *Instance) performOperation(
 	kind coreabi.OperationKind,
 	submit func(context.Context, dataPlaneCore) (coreabi.OperationID, error),
 ) (coreabi.OperationResult, error) {
+	return instance.performOperationNotify(ctx, kind, submit, nil)
+}
+
+// performOperationNotify is performOperation with a hook invoked once the
+// operation has been accepted by the guest. Callers that need to distinguish
+// "the guest never saw the request" from "the guest is still waiting for a
+// remote ACK" use the hook to record that the operation was submitted.
+func (instance *Instance) performOperationNotify(
+	ctx context.Context,
+	kind coreabi.OperationKind,
+	submit func(context.Context, dataPlaneCore) (coreabi.OperationID, error),
+	notifySubmitted func(),
+) (coreabi.OperationResult, error) {
 	if ctx == nil {
 		return coreabi.OperationResult{}, fmt.Errorf(
 			"submit EasyTier data plane operation with nil context",
@@ -153,9 +166,15 @@ func (instance *Instance) performOperation(
 			return coreabi.OperationResult{}, mapDataPlaneError(submitted.err)
 		}
 		if submitted.completed {
+			if notifySubmitted != nil {
+				notifySubmitted()
+			}
 			return submitted.outcome.result, mapDataPlaneError(submitted.outcome.err)
 		}
 		ticket = submitted.ticket
+		if notifySubmitted != nil {
+			notifySubmitted()
+		}
 	case <-instance.done:
 		return coreabi.OperationResult{}, net.ErrClosed
 	case <-instance.closeRequested:
@@ -169,11 +188,17 @@ func (instance *Instance) performOperation(
 				return coreabi.OperationResult{}, mapDataPlaneError(submitted.err)
 			}
 			if submitted.completed {
+				if notifySubmitted != nil {
+					notifySubmitted()
+				}
 				return submitted.outcome.result, mapDataPlaneError(
 					submitted.outcome.err,
 				)
 			}
 			ticket = submitted.ticket
+			if notifySubmitted != nil {
+				notifySubmitted()
+			}
 		case <-instance.done:
 			return coreabi.OperationResult{}, net.ErrClosed
 		case <-instance.closeRequested:
@@ -275,6 +300,15 @@ func (instance *Instance) closeDataPlaneResource(
 }
 
 func (instance *Instance) setDataPlaneResourceDeadline(
+	resource coreabi.ResourceID,
+	direction coreabi.DeadlineDirection,
+	deadline time.Time,
+) error {
+	return instance.setDataPlaneResourceDeadlineContext(context.Background(), resource, direction, deadline)
+}
+
+func (instance *Instance) setDataPlaneResourceDeadlineContext(
+	ctx context.Context,
 	resource coreabi.ResourceID,
 	direction coreabi.DeadlineDirection,
 	deadline time.Time,

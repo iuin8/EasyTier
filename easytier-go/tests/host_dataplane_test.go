@@ -201,55 +201,62 @@ func testTCPDataPlane(
 	}
 }
 
-// Close must send FIN even when the application already let a write deadline
+// Close must send FIN even when the application already let a deadline
 // expire: the guest applies the stream's write deadline to shutdown(), which
 // used to turn Close into "shutdown write: context deadline exceeded".
 func TestTCPCloseAfterExpiredDeadlines(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-	host, server, client := startDataPlanePair(t, ctx)
-	defer host.Close(ctx)
-	defer server.Close(ctx)
-	defer client.Close(ctx)
-
-	listener := listenTCPEventually(t, ctx, server)
-	defer listener.Close()
-	accepted := make(chan connectionResult, 1)
-	go func() {
-		connection, err := listener.Accept()
-		accepted <- connectionResult{connection: connection, err: err}
-	}()
-	clientConnection := dialEventually(t, ctx, client,
-		fmt.Sprintf("10.144.0.101:%d", listener.Addr().(*net.TCPAddr).Port))
-	var serverConnection net.Conn
-	select {
-	case result := <-accepted:
-		if result.err != nil {
-			t.Fatalf("accept EasyTier TCP: %v", result.err)
-		}
-		serverConnection = result.connection
-	case <-ctx.Done():
-		t.Fatalf("accept EasyTier TCP: %v", ctx.Err())
-	}
-
 	past := time.Now().Add(-time.Second)
-	if err := clientConnection.SetWriteDeadline(past); err != nil {
-		t.Fatalf("set expired client write deadline: %v", err)
-	}
-	if err := clientConnection.Close(); err != nil {
-		t.Fatalf("client close after expired write deadline: %v", err)
-	}
-	if err := serverConnection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatalf("set server read deadline: %v", err)
-	}
-	if _, err := serverConnection.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
-		t.Fatalf("server read after expired-deadline close = %v, want io.EOF", err)
-	}
-	if err := serverConnection.SetWriteDeadline(past); err != nil {
-		t.Fatalf("set expired server write deadline: %v", err)
-	}
-	if err := serverConnection.Close(); err != nil {
-		t.Fatalf("server close after expired write deadline: %v", err)
+	for name, expire := range map[string]func(net.Conn) error{
+		"write": func(c net.Conn) error { return c.SetWriteDeadline(past) },
+		"full":  func(c net.Conn) error { return c.SetDeadline(past) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			host, server, client := startDataPlanePair(t, ctx)
+			defer host.Close(ctx)
+			defer server.Close(ctx)
+			defer client.Close(ctx)
+
+			listener := listenTCPEventually(t, ctx, server)
+			defer listener.Close()
+			accepted := make(chan connectionResult, 1)
+			go func() {
+				connection, err := listener.Accept()
+				accepted <- connectionResult{connection: connection, err: err}
+			}()
+			clientConnection := dialEventually(t, ctx, client,
+				fmt.Sprintf("10.144.0.101:%d", listener.Addr().(*net.TCPAddr).Port))
+			var serverConnection net.Conn
+			select {
+			case result := <-accepted:
+				if result.err != nil {
+					t.Fatalf("accept EasyTier TCP: %v", result.err)
+				}
+				serverConnection = result.connection
+			case <-ctx.Done():
+				t.Fatalf("accept EasyTier TCP: %v", ctx.Err())
+			}
+
+			if err := expire(clientConnection); err != nil {
+				t.Fatalf("set expired client deadline: %v", err)
+			}
+			if err := clientConnection.Close(); err != nil {
+				t.Fatalf("client close after expired deadline: %v", err)
+			}
+			if err := serverConnection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatalf("set server read deadline: %v", err)
+			}
+			if _, err := serverConnection.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+				t.Fatalf("server read after expired-deadline close = %v, want io.EOF", err)
+			}
+			if err := expire(serverConnection); err != nil {
+				t.Fatalf("set expired server deadline: %v", err)
+			}
+			if err := serverConnection.Close(); err != nil {
+				t.Fatalf("server close after expired deadline: %v", err)
+			}
+		})
 	}
 }
 
