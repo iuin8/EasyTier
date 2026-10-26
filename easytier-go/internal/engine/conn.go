@@ -138,6 +138,17 @@ func (conn *streamConn) Close() error {
 		// Half-close first: dropping the resource alone never emits FIN, so the
 		// peer keeps the connection ESTABLISHED (and an exit node's forwarding
 		// task waits on it forever). Release the resource in every case.
+		//
+		// Close must not inherit an application deadline: the guest applies the
+		// stream's write deadline to shutdown(), so an expired SetDeadline or
+		// SetWriteDeadline would turn the FIN into a deadline error. Clear the
+		// write deadline first; a failure here is irrelevant because the
+		// resource is released immediately afterwards.
+		_ = conn.instance.setDataPlaneResourceDeadline(
+			conn.resource,
+			coreabi.DeadlineWrite,
+			time.Time{},
+		)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), tcpShutdownTimeout)
 		_, shutdownErr := conn.instance.performOperation(
 			shutdownCtx,
@@ -150,8 +161,10 @@ func (conn *streamConn) Close() error {
 			},
 		)
 		cancel()
-		if shutdownErr != nil {
+		if shutdownErr != nil && !errors.Is(shutdownErr, context.DeadlineExceeded) {
 			shutdownErr = fmt.Errorf("shutdown write: %w", shutdownErr)
+		} else {
+			shutdownErr = nil
 		}
 		conn.closeErr = shutdownErr
 		if err := conn.instance.closeDataPlaneResource(conn.resource); err != nil && conn.closeErr == nil {
