@@ -290,6 +290,13 @@ func cancelledOutcome(
 func (instance *Instance) closeDataPlaneResource(
 	resource coreabi.ResourceID,
 ) error {
+	return instance.closeDataPlaneResourceContext(context.Background(), resource)
+}
+
+func (instance *Instance) closeDataPlaneResourceContext(
+	ctx context.Context,
+	resource coreabi.ResourceID,
+) error {
 	response := make(chan dataPlaneCommandResponse, 1)
 	request := dataPlaneCommand{
 		kind:     dataPlaneCloseResource,
@@ -302,6 +309,8 @@ func (instance *Instance) closeDataPlaneResource(
 		return net.ErrClosed
 	case <-instance.closeRequested:
 		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	select {
 	case result := <-response:
@@ -310,6 +319,8 @@ func (instance *Instance) closeDataPlaneResource(
 		return net.ErrClosed
 	case <-instance.closeRequested:
 		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

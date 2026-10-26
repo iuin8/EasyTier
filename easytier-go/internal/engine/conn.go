@@ -169,7 +169,6 @@ func (conn *streamConn) Close() error {
 			},
 			func() { submitted = true },
 		)
-		cancel()
 		switch {
 		case shutdownErr == nil:
 		case submitted && errors.Is(shutdownErr, context.DeadlineExceeded):
@@ -179,9 +178,15 @@ func (conn *streamConn) Close() error {
 			shutdownErr = fmt.Errorf("shutdown write: %w", shutdownErr)
 		}
 		conn.closeErr = shutdownErr
-		if err := conn.instance.closeDataPlaneResource(conn.resource); err != nil && conn.closeErr == nil {
+		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), tcpShutdownTimeout/4)
+		// Resource release is best effort once the 2s budget is spent: the
+		// guest may never answer a wedged command loop, but Close must return.
+		if err := conn.instance.closeDataPlaneResourceContext(releaseCtx, conn.resource); err != nil &&
+			conn.closeErr == nil && !errors.Is(err, context.DeadlineExceeded) {
 			conn.closeErr = err
 		}
+		cancelRelease()
+		cancel()
 		close(conn.closeDone)
 	})
 

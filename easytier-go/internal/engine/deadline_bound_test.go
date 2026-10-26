@@ -49,3 +49,54 @@ func TestPerformOperationSubmitResponseHonorsContext(t *testing.T) {
 		t.Fatalf("submit blocked for %v", elapsed)
 	}
 }
+
+func TestCloseHonorsBudgetWithStuckCommandLoop(t *testing.T) {
+	instance := &Instance{dataPlaneCommands: make(chan dataPlaneCommand)}
+	conn := &streamConn{
+		instance:  instance,
+		resource:  coreabi.ResourceID(1),
+		closeDone: make(chan struct{}),
+	}
+	start := time.Now()
+	err := conn.Close()
+	elapsed := time.Since(start)
+	if elapsed > 3*time.Second {
+		t.Fatalf("Close blocked for %v", elapsed)
+	}
+	if err == nil {
+		t.Fatal("Close with a stuck command loop must report the failure")
+	}
+}
+
+func TestCloseAttemptsReleaseAfterShutdownTimeout(t *testing.T) {
+	commands := make(chan dataPlaneCommand, 8)
+	instance := &Instance{dataPlaneCommands: commands}
+	releaseSeen := make(chan struct{})
+	go func() {
+		for command := range commands {
+			if command.kind == dataPlaneCloseResource {
+				close(releaseSeen)
+			}
+			// Never answer: simulate a wedged guest command loop.
+		}
+	}()
+	conn := &streamConn{
+		instance:  instance,
+		resource:  coreabi.ResourceID(1),
+		closeDone: make(chan struct{}),
+	}
+	start := time.Now()
+	err := conn.Close()
+	elapsed := time.Since(start)
+	select {
+	case <-releaseSeen:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not send dataPlaneCloseResource")
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("Close blocked for %v", elapsed)
+	}
+	if err == nil {
+		t.Fatal("Close with a stuck command loop must report the shutdown failure")
+	}
+}
