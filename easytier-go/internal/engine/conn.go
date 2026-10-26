@@ -144,7 +144,7 @@ func (conn *streamConn) Close() error {
 		// SetWriteDeadline would turn the FIN into a deadline error. Clear the
 		// write deadline first, bounded by the same shutdown budget.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), tcpShutdownTimeout)
-		clearCtx, cancelClear := context.WithTimeout(shutdownCtx, tcpShutdownTimeout/4)
+		clearCtx, cancelClear := context.WithTimeout(shutdownCtx, tcpShutdownTimeout/2)
 		_ = conn.instance.setDataPlaneResourceDeadlineContext(
 			clearCtx,
 			conn.resource,

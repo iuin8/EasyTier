@@ -203,6 +203,10 @@ func (instance *Instance) performOperationNotify(
 			return coreabi.OperationResult{}, net.ErrClosed
 		case <-instance.closeRequested:
 			return coreabi.OperationResult{}, net.ErrClosed
+		case <-ctx.Done():
+			// The guest may never answer (command loop wedged). Return the
+			// caller's deadline instead of waiting forever.
+			return coreabi.OperationResult{}, ctx.Err()
 		}
 		return instance.cancelAndWait(ctx, ticket)
 	}
@@ -219,10 +223,14 @@ func (instance *Instance) performOperationNotify(
 	}
 }
 
+const dataPlaneCancelTimeout = 100 * time.Millisecond
+
 func (instance *Instance) cancelAndWait(
 	cancelled context.Context,
 	ticket operationTicket,
 ) (coreabi.OperationResult, error) {
+	cancelCtx, cancel := context.WithTimeout(context.Background(), dataPlaneCancelTimeout)
+	defer cancel()
 	response := make(chan dataPlaneCommandResponse, 1)
 	request := dataPlaneCommand{
 		kind:      dataPlaneCancel,
@@ -237,6 +245,8 @@ func (instance *Instance) cancelAndWait(
 		return coreabi.OperationResult{}, net.ErrClosed
 	case <-instance.closeRequested:
 		return coreabi.OperationResult{}, net.ErrClosed
+	case <-cancelCtx.Done():
+		return coreabi.OperationResult{}, cancelled.Err()
 	}
 	select {
 	case result := <-response:
@@ -249,6 +259,8 @@ func (instance *Instance) cancelAndWait(
 		return coreabi.OperationResult{}, net.ErrClosed
 	case <-instance.closeRequested:
 		return coreabi.OperationResult{}, net.ErrClosed
+	case <-cancelCtx.Done():
+		return coreabi.OperationResult{}, cancelled.Err()
 	}
 
 	select {
@@ -258,6 +270,8 @@ func (instance *Instance) cancelAndWait(
 		return coreabi.OperationResult{}, net.ErrClosed
 	case <-instance.closeRequested:
 		return coreabi.OperationResult{}, net.ErrClosed
+	case <-cancelCtx.Done():
+		return coreabi.OperationResult{}, cancelled.Err()
 	}
 }
 
@@ -327,6 +341,8 @@ func (instance *Instance) setDataPlaneResourceDeadlineContext(
 		return net.ErrClosed
 	case <-instance.closeRequested:
 		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	select {
 	case result := <-response:
@@ -335,6 +351,8 @@ func (instance *Instance) setDataPlaneResourceDeadlineContext(
 		return net.ErrClosed
 	case <-instance.closeRequested:
 		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
